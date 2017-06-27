@@ -1,0 +1,507 @@
+---
+title: "Healthcare Gender Disparity in the VA/DC/MD Region"
+author: "Brendan Molin"
+date: "April 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      tidy = TRUE)
+```
+
+## Abstract
+
+The consolidation of the healthcare system into large health systems and hospital complexes bodes well for independent female providers who depend on referrals for their business.  Female providers tend to receive fewer referrals from independent providers, particularly from male providers but from female providers as well.  Hospitals and extensions of acute care however are relatively gender blind in who they send referrals to.
+
+The researcher's theory to explain the gender bias from independent providers is that patient preference is the driving factor, as this data sources from Medicare recipients, whose services would be mostly leveraged by older populations who likely hold more traditional views on gender roles in the healthcare profession.  Patient preference likely has a much stronger influence on independent providers than in hospitals or healthcare centers.  Further research on data that included the age of the referred patient could validate or reject this hypothesis.
+
+## Data Source
+
+The source of the data used comes from the Center for Medicare and Medicaid Services (CMS) via a Freedom of Information Act Request.
+
+<https://questions.cms.gov/faq.php?faqId=7977>
+
+
+Description from the documentation:
+
+'The requestor has asked to look at providers who share relationships with common patients. That sharing is defined as "An organization or provider participating in the delivery of health services to the same patient within a 30 days, 60 days, 90 days and finally a 180 day period after another organization or provider participated in providing health services to the same patient."...
+
+...In order to protect the identity of patients, this report excludes any sharing that happened with less than 11 different patients over the course of the year.
+
+A "treatment association" is any field in the claims database,-other- than referring NPI, or the NPI for suppliers of durable medical equipment. Essentially, those NPI records that could have participated in the delivery of healthcare services associated with a given claim...
+
+...The report will include claims for calendar year 2009 through the 10/1/2015...
+
+...The report will include these institutional claim types: 
+. 10 Medicare HHA Claim
+. 20 Medicare Non-Swing Bed SNF Claim
+. 30 Medicare Swing Bed SNF Claim
+. 40 Medicare Outpatient Claim
+. 50 Medicare Hospice Claim
+. 60 Medicare Inpatient Claim
+. 61 Medicare Inpatient Full Encounter Claim
+. 63 Medicare Advantage (No-Pay) Claims
+The report will include these non-institutional claim types:
+. 71 Medicare RIC 0 Local Carrier
+. 72 Medicare RIC 0 Local Carrier
+. 81 Medicare RIC M DMERC Non-DMEPOS Cl'
+
+<https://downloads.cms.gov/foia/physician_shared_patient_patterns_technical_requirements.pdf>
+
+This research used the 2015 30 days windows so the study could be completely reproducible in a local instance of R.  Larger windows of time contain more data, and would thus require intervention of data management solutions and a more rigorous documentation to reproduce.
+
+This research examined # of shared relationships. 
+
+The region is restricted to the Virginia-DC-Maryland areas.
+
+Data on providers was also obtained from CMS:
+
+<http://download.cms.gov/nppes/NPI_Files.html>
+
+```{r import}
+# Set Directory
+setwd("C:/Users/bmolin/Documents/GitProject/CMS Order/")
+
+# Set library
+library(dplyr)
+library(ggplot2)
+library(plotly)
+
+### Import Data
+
+## Shared Patients Data:
+# Download File
+download.file("http://downloads.cms.gov/foia/physician-shared-patient-patterns-2015-days30.zip",
+              "physician-shared_patient_patterns-2015-days30.zip")
+# Download file support
+download.file("https://downloads.cms.gov/foia/physician_shared_patient_patterns_technical_requirements.pdf",
+              "physician_shared_patient_patterns_technical_requirements.pdf")
+
+data <- read.table(unz("physician-shared_patient_patterns-2015-days30.zip",
+                       "physician-shared-patient-patterns-2015-days30.txt"), nrows=10, header=FALSE, sep=",")
+
+data
+
+data <- read.csv(unz("physician-shared_patient_patterns-2015-days30.zip",
+                     "physician-shared-patient-patterns-2015-days30.txt"),
+                 header=FALSE,
+                 colClasses = c(NA, NA, NA, "NULL", "NULL"))
+
+# Name Headers (from reading guide)
+colnames(data) <- c("NPI1", "NPI2", "PairCount")
+
+data$NPI1 <- as.character(data$NPI1)
+data$NPI2 <- as.character(data$NPI2)
+
+## NPI Data:
+# Download File
+download.file("http://download.cms.gov/nppes/NPPES_Data_Dissemination_April_2017.zip",
+              "NPPES_Data_Dissemination_April_2017.zip")
+
+# Read in sample
+npi_dic <- read.csv(unz("NPPES_Data_Dissemination_April_2017.zip",
+                        "npidata_20050523-20170409.csv"), nrows=10, header=TRUE)
+
+
+# Find variables of interest and get column places:
+
+# Check which taxonomy field we need
+#npi_dic[,colnames(npi_dic)[grepl("Taxonomy",colnames(npi_dic))]]
+
+# NPI
+# Provider.Credential.Text
+# Provider.Business.Practice.Location.Address.Postal.Code
+# Provider.Business.Practice.Location.Address.State.Name
+# Provider.Gender.Code
+# Healthcare.Provider.Taxonomy.Code_1
+
+interest_columns <- colnames(npi_dic) %in% c("NPI",
+                                             "Provider.Credential.Text",
+                                             "Provider.Business.Practice.Location.Address.Postal.Code",
+                                             "Provider.Business.Practice.Location.Address.State.Name",
+                                             "Provider.Gender.Code",
+                                             "Healthcare.Provider.Taxonomy.Code_1")
+mycols <- rep("NULL", ncol(npi_dic))
+mycols[interest_columns] <- NA
+
+# Read in table
+npi_dic <- read.csv(unz("NPPES_Data_Dissemination_April_2017.zip",
+                        "npidata_20050523-20170409.csv"),
+                    header=TRUE,
+                    colClasses = mycols)
+
+npi_dic$NPI <- as.character(npi_dic$NPI)
+
+# Read in Taxonomy Codes
+download.file("http://www.nucc.org/images/stories/CSV/nucc_taxonomy_170.csv",
+              "nucc_taxonomy_170.csv")
+taxonomy <- read.csv("nucc_taxonomy_170.csv", header = TRUE)
+taxonomy <- unique(taxonomy[,c(1,3)])
+
+### PRE PROCESSING
+
+# Limit referrals based out of or sent to Virginia, Maryland, and Washington, DC
+data <- data[data$NPI1 %in% npi_dic[npi_dic$Provider.Business.Practice.Location.Address.State.Name %in% c("VA", "Virginia", "MD", "District of Columbia"),"NPI"] |
+               data$NPI2 %in% npi_dic[npi_dic$Provider.Business.Practice.Location.Address.State.Name %in% c("VA", "Virginia", "MD", "District of Columbia"),"NPI"],]
+
+# Limit NPIs in dictionary to those remaining in the referrals list
+npi_dic <- npi_dic[npi_dic$NPI %in% data$NPI1 | npi_dic$NPI %in% data$NPI2,]
+
+# Consolidate Provider Credentials to 'Physicians, Nurses, Other'
+npi_dic$Provider.Credential.Text <- as.character(npi_dic$Provider.Credential.Text)
+npi_dic[grepl("MD", npi_dic$Provider.Credential.Text) |
+          grepl("M.D", npi_dic$Provider.Credential.Text) |
+          grepl("DO", npi_dic$Provider.Credential.Text) |
+          grepl("D.O.", npi_dic$Provider.Credential.Text) |
+          grepl("PA", npi_dic$Provider.Credential.Text) |
+          grepl("P.A.", npi_dic$Provider.Credential.Text), "Provider.Credential.Text"] <- "Physician"
+
+npi_dic[grepl("NP", npi_dic$Provider.Credential.Text) |
+          grepl("N.P", npi_dic$Provider.Credential.Text), "Provider.Credential.Text"] <- "Nurse Practitioner"
+
+npi_dic[!(npi_dic$Provider.Credential.Text %in% c("Physician", "Nurse Practitioner")), "Provider.Credential.Text"] <- "Other"
+npi_dic$Provider.Credential.Text <- factor(npi_dic$Provider.Credential.Text)
+
+# Map Taxonomy
+npi_dic$Healthcare.Provider.Taxonomy.Code_1 <- taxonomy[match(npi_dic$Healthcare.Provider.Taxonomy.Code_1, taxonomy$Code),"Classification"]
+
+tax_rank <- as.data.frame(table(npi_dic$Healthcare.Provider.Taxonomy.Code_1))
+tax_rank$rank <- rank(-tax_rank$Freq, ties.method = "last")
+npi_dic <- merge(npi_dic, tax_rank, by.x = "Healthcare.Provider.Taxonomy.Code_1", by.y = "Var1")
+
+# Merge databases twice - one on NPI1, one on NPI2
+data2 <- merge(data, npi_dic, by.x = "NPI1", by.y = "NPI")
+data3 <- merge(data2, npi_dic, by.x = "NPI2", by.y = "NPI")
+
+```
+
+## Analysis
+
+The healthcare industry is still a predominately male working environment, and overall distribution of the referrals reflect this fact, as most referrals are sent to male providers.  There is, however, a slight imbalance when examining the gender of the sending provider.
+
+```{r orders_overall}
+# Compare Gender-Gender Referrals in aggregate
+data3 %>%
+  filter(Provider.Gender.Code.x %in% c("F", "M"),
+         Provider.Gender.Code.y %in% c("F", "M")) %>%
+  group_by(Provider.Gender.Code.x, Provider.Gender.Code.y) %>%
+  summarise(Referrals = sum(PairCount)) %>%
+  mutate(Total = sum(Referrals),
+         proportion = Referrals/Total) %>%
+  ggplot(aes(y = proportion, x = Provider.Gender.Code.x, fill = Provider.Gender.Code.y)) + geom_bar(stat = 'identity') +
+  ggtitle("Orders Sent to Provider by Gender of Receiver and Sender") + 
+  xlab("Sending Provider Gender") + 
+  ylab("Proportion of Relationships") + 
+  labs(fill = "Receiving Provider Gender") +
+  theme(legend.position="bottom")
+
+```
+
+This imbalance can really be highlighted when you account for the specialty or role of the receiving provider.  Traditionally female-held specialties and roles like nursing are radical outliers in that they gain the majority of referrals.
+
+```{r orders_specialty}
+data3 %>%
+  filter(Provider.Gender.Code.x %in% c("F", "M"),
+         Provider.Gender.Code.y %in% c("F", "M"),
+         rank.y <= 30) %>%
+  group_by(Provider.Gender.Code.x, Healthcare.Provider.Taxonomy.Code_1.y, Provider.Gender.Code.y) %>%
+  summarise(Referrals = sum(PairCount)) %>%
+  group_by(Provider.Gender.Code.x, Healthcare.Provider.Taxonomy.Code_1.y) %>%
+  mutate(Total = sum(Referrals),
+           proportion = Referrals/Total) %>%
+  ggplot(aes(y = proportion, x = Provider.Gender.Code.x, fill = Provider.Gender.Code.y)) +
+  geom_bar(stat = 'identity') +
+  facet_wrap(~Healthcare.Provider.Taxonomy.Code_1.y) + 
+  ggtitle("Orders Sent to Provider by Gender of Receiver and Sender by Specialty") + 
+  xlab("Sending Provider Gender") + 
+  ylab("Proportion of Relationships") +
+  theme(legend.position="none",
+        axis.text=element_text(size=6),
+        strip.text = element_text(size=6))
+```
+
+Aside from the source gender disparity, most of the imbalance in referrals can likely be attributed to the composition of genders within specialties.  Women in nursing facilities should receive more orders in aggregate than men, since the profession is mostly women.
+
+One notable exception here is in Obstetrics & Gynecology.  An industry that is 84% women overall (and ~60% in this sample) receives less than half of the referrals.
+
+To normalize for these factors, we compare the industry distribution of women in a specialty to the percent of the orders they receive, split by the gender of the sender (including no gender, ie a hospital facility).
+
+(Interactive: hover over the points to see the specialty)
+```{r scatter}
+
+# Gender Counts by Specialty
+gender_count <- npi_dic %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1) %>%
+  summarise(c_women = sum(Provider.Gender.Code == 'F'),
+            c_men = sum(Provider.Gender.Code == 'M')) %>%
+  mutate(c_women_pct = c_women/(c_women + c_men)) %>%
+  filter(!is.na(c_women_pct))
+
+# Referrals Counts by Specialty
+gender_orders <- data3 %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1.y, Provider.Gender.Code.x) %>%
+  summarise(o_women = sum(Provider.Gender.Code.y == 'F'),
+            o_men = sum(Provider.Gender.Code.y == 'M')) %>%
+  mutate(o_women_pct = o_women/(o_women + o_men)) %>%
+  filter(!is.na(o_women_pct))
+
+gender_comp <- merge(gender_count, gender_orders, by.x = "Healthcare.Provider.Taxonomy.Code_1", by.y = "Healthcare.Provider.Taxonomy.Code_1.y")
+
+gender_comp %>%
+  mutate(women_plus = o_women_pct - c_women_pct,
+         c_total = c_women + c_men) %>%
+  plot_ly(x = ~c_women_pct,
+          y = ~o_women_pct,
+          color = ~Provider.Gender.Code.x,
+          size = ~log(c_total,1.1),
+          type = 'scatter',
+          mode = 'markers',
+          text = ~paste("Specialty:",
+                        Healthcare.Provider.Taxonomy.Code_1,
+                        '<br>Providers:',
+                        c_total,
+                        '<br>Source Gender:',
+                        Provider.Gender.Code.x)) %>%
+  layout(xaxis =  list(title = "% of Specialty is Women"),
+         yaxis = list(title = "% Orders to Women"))
+```
+
+Checking our outlier Obstetrics & Gynecology, we confirm that adjusting for the composition of genders in the profession does not account for the imbalance of referrals towards men.  This is a truly odd feature of this data that deserves a follow-up investigation.
+
+Other specialties that suffer a relative imbalance given the composition of genders in their field across all sending providers, save for low-volume specialties, include:
+
+*Higher Female Imbalance*
+
+1.  Nursing
+
+2.  Psychologists
+
+3.  Nuclear Medicine
+
+*Higher Male Imbalance*
+
+1.  Allergy/Immunology
+
+2.  Surgeons
+
+3.  Counselors
+
+Looking along the diagonal, it is evident that the 'no gender' category has relatively no gender bias in who the referrals are sent to.  The source of these no-gender sourced referrals are:
+
+```{r nogender}
+no_gender <- 
+  npi_dic %>%
+  filter(Provider.Gender.Code == '') %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1) %>%
+  summarise(freq = n()) %>%
+  arrange(desc(freq))
+no_gender[1:30,]
+```
+
+## Conclusions
+
+We've proven that there are large gender disparities in where referrals are sent that is not totally explained by the number of professionals in the field.  One likely reason for this is a more traditional mentality of gender roles amongst Medicare recipients.  However, this cannot explain the relative imbalance in referrals sent to Obstetrics & Gynecology, where one would expect patient preference to lean toward female.
+
+Recommended follow-up analyses include patient surveys to determine provider preference amongst Medicare patients vs other patients, and regional comparisons to study if this section of the Mid-Atlantic is representative of the nation.
+
+## Code
+
+
+
+```{r code, eval = FALSE, echo = TRUE}
+# Set Directory
+setwd("C:/Users/bmolin/Documents/GitProject/CMS Order/")
+
+# Set library
+library(dplyr)
+library(ggplot2)
+library(plotly)
+
+### Import Data
+
+## Shared Patients Data:
+# Download File
+download.file("http://downloads.cms.gov/foia/physician-shared-patient-patterns-2015-days30.zip",
+              "physician-shared_patient_patterns-2015-days30.zip")
+# Download file support
+download.file("https://downloads.cms.gov/foia/physician_shared_patient_patterns_technical_requirements.pdf",
+              "physician_shared_patient_patterns_technical_requirements.pdf")
+
+data <- read.table(unz("physician-shared_patient_patterns-2015-days30.zip",
+                       "physician-shared-patient-patterns-2015-days30.txt"), nrows=10, header=FALSE, sep=",")
+
+data
+
+data <- read.csv(unz("physician-shared_patient_patterns-2015-days30.zip",
+                       "physician-shared-patient-patterns-2015-days30.txt"),
+                   header=FALSE,
+                   colClasses = c(NA, NA, NA, "NULL", "NULL"))
+
+# Name Headers (from reading guide)
+colnames(data) <- c("NPI1", "NPI2", "PairCount")
+
+data$NPI1 <- as.character(data$NPI1)
+data$NPI2 <- as.character(data$NPI2)
+
+## NPI Data:
+# Download File
+download.file("http://download.cms.gov/nppes/NPPES_Data_Dissemination_April_2017.zip",
+              "NPPES_Data_Dissemination_April_2017.zip")
+
+# Read in sample
+npi_dic <- read.csv(unz("NPPES_Data_Dissemination_April_2017.zip",
+                       "npidata_20050523-20170409.csv"), nrows=10, header=TRUE)
+
+
+# Find variables of interest and get column places:
+
+# Check which taxonomy field we need
+npi_dic[,colnames(npi_dic)[grepl("Taxonomy",colnames(npi_dic))]]
+
+# NPI
+# Provider.Credential.Text
+# Provider.Business.Practice.Location.Address.Postal.Code
+# Provider.Business.Practice.Location.Address.State.Name
+# Provider.Gender.Code
+# Healthcare.Provider.Taxonomy.Code_1
+
+interest_columns <- colnames(npi_dic) %in% c("NPI",
+                               "Provider.Credential.Text",
+                               "Provider.Business.Practice.Location.Address.Postal.Code",
+                               "Provider.Business.Practice.Location.Address.State.Name",
+                               "Provider.Gender.Code",
+                               "Healthcare.Provider.Taxonomy.Code_1")
+mycols <- rep("NULL", ncol(npi_dic))
+mycols[interest_columns] <- NA
+
+# Read in table
+npi_dic <- read.csv(unz("NPPES_Data_Dissemination_April_2017.zip",
+                        "npidata_20050523-20170409.csv"),
+                    header=TRUE,
+                    colClasses = mycols)
+
+npi_dic$NPI <- as.character(npi_dic$NPI)
+
+# Read in Taxonomy Codes
+download.file("http://www.nucc.org/images/stories/CSV/nucc_taxonomy_170.csv",
+              "nucc_taxonomy_170.csv")
+taxonomy <- read.csv("nucc_taxonomy_170.csv", header = TRUE)
+taxonomy <- unique(taxonomy[,c(1,3)])
+
+### PRE PROCESSING
+
+# Limit referrals based out of or sent to Virginia, Maryland, and Washington, DC
+data <- data[data$NPI1 %in% npi_dic[npi_dic$Provider.Business.Practice.Location.Address.State.Name %in% c("VA", "Virginia", "MD", "District of Columbia"),"NPI"] |
+               data$NPI2 %in% npi_dic[npi_dic$Provider.Business.Practice.Location.Address.State.Name %in% c("VA", "Virginia", "MD", "District of Columbia"),"NPI"],]
+
+# Limit NPIs in dictionary to those remaining in the referrals list
+npi_dic <- npi_dic[npi_dic$NPI %in% data$NPI1 | npi_dic$NPI %in% data$NPI2,]
+
+# Consolidate Provider Credentials to 'Physicians, Nurses, Other'
+npi_dic$Provider.Credential.Text <- as.character(npi_dic$Provider.Credential.Text)
+npi_dic[grepl("MD", npi_dic$Provider.Credential.Text) |
+        grepl("M.D", npi_dic$Provider.Credential.Text) |
+        grepl("DO", npi_dic$Provider.Credential.Text) |
+        grepl("D.O.", npi_dic$Provider.Credential.Text) |
+        grepl("PA", npi_dic$Provider.Credential.Text) |
+        grepl("P.A.", npi_dic$Provider.Credential.Text), "Provider.Credential.Text"] <- "Physician"
+
+npi_dic[grepl("NP", npi_dic$Provider.Credential.Text) |
+        grepl("N.P", npi_dic$Provider.Credential.Text), "Provider.Credential.Text"] <- "Nurse Practitioner"
+
+npi_dic[!(npi_dic$Provider.Credential.Text %in% c("Physician", "Nurse Practitioner")), "Provider.Credential.Text"] <- "Other"
+npi_dic$Provider.Credential.Text <- factor(npi_dic$Provider.Credential.Text)
+
+# Map Taxonomy
+npi_dic$Healthcare.Provider.Taxonomy.Code_1 <- taxonomy[match(npi_dic$Healthcare.Provider.Taxonomy.Code_1, taxonomy$Code),"Classification"]
+
+tax_rank <- as.data.frame(table(npi_dic$Healthcare.Provider.Taxonomy.Code_1))
+tax_rank$rank <- rank(-tax_rank$Freq, ties.method = "last")
+npi_dic <- merge(npi_dic, tax_rank, by.x = "Healthcare.Provider.Taxonomy.Code_1", by.y = "Var1")
+
+# Merge databases twice - one on NPI1, one on NPI2
+data2 <- merge(data, npi_dic, by.x = "NPI1", by.y = "NPI")
+data3 <- merge(data2, npi_dic, by.x = "NPI2", by.y = "NPI")
+
+rm(list=setdiff(ls(), c("data3", "npi_dic")))
+
+### Analysis
+
+# Compare Gender-Gender Referrals in aggregate
+data3 %>%
+  filter(Provider.Gender.Code.x %in% c("F", "M"),
+         Provider.Gender.Code.y %in% c("F", "M")) %>%
+  group_by(Provider.Gender.Code.x, Provider.Gender.Code.y) %>%
+  summarise(Referrals = sum(PairCount)) %>%
+  mutate(Total = sum(Referrals),
+         proportion = Referrals/Total) %>%
+  ggplot(aes(y = proportion, x = Provider.Gender.Code.x, fill = Provider.Gender.Code.y)) + geom_bar(stat = 'identity') +
+   ggtitle("Orders Sent to Provider by Gender of Reciever and Sender") + 
+  xlab("Sending Provider Gender") + 
+  ylab("Proportion of Relationships") +
+  labs(fill = "Receiving Provider Gender")
+
+# ...by Specialty of Receiver
+data3 %>%
+  filter(Provider.Gender.Code.x %in% c("F", "M"),
+         Provider.Gender.Code.y %in% c("F", "M"),
+         rank.y <= 30) %>%
+  group_by(Provider.Gender.Code.x, Healthcare.Provider.Taxonomy.Code_1.y, Provider.Gender.Code.y) %>%
+  summarise(Referrals = sum(PairCount)) %>%
+  group_by(Provider.Gender.Code.x, Healthcare.Provider.Taxonomy.Code_1.y) %>%
+  mutate(Total = sum(Referrals),
+           proportion = Referrals/Total) %>%
+  ggplot(aes(y = proportion, x = Provider.Gender.Code.x, fill = Provider.Gender.Code.y)) +
+  geom_bar(stat = 'identity') +
+  facet_wrap(~Healthcare.Provider.Taxonomy.Code_1.y) + 
+  xlab("Sending Provider Gender") + 
+  ylab("Proportion of Relationships") +
+  theme(legend.position="none") +
+  labs(fill = "Receiving Provider Gender")
+
+# Gender Counts by Specialty
+gender_count <- npi_dic %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1) %>%
+  summarise(c_women = sum(Provider.Gender.Code == 'F'),
+            c_men = sum(Provider.Gender.Code == 'M')) %>%
+  mutate(c_women_pct = c_women/(c_women + c_men)) %>%
+  filter(!is.na(c_women_pct))
+
+# Referrals Counts by Specialty
+gender_orders <- data3 %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1.y, Provider.Gender.Code.x) %>%
+  summarise(o_women = sum(Provider.Gender.Code.y == 'F'),
+            o_men = sum(Provider.Gender.Code.y == 'M')) %>%
+  mutate(o_women_pct = o_women/(o_women + o_men)) %>%
+  filter(!is.na(o_women_pct))
+
+gender_comp <- merge(gender_count, gender_orders, by.x = "Healthcare.Provider.Taxonomy.Code_1", by.y = "Healthcare.Provider.Taxonomy.Code_1.y")
+
+gender_comp %>%
+  mutate(women_plus = o_women_pct - c_women_pct,
+         c_total = c_women + c_men) %>%
+  plot_ly(x = ~c_women_pct,
+          y = ~o_women_pct,
+          color = ~Provider.Gender.Code.x,
+          size = ~log(c_total,1.1),
+          type = 'scatter',
+          mode = 'markers',
+          text = ~paste("Specialty:",
+                        Healthcare.Provider.Taxonomy.Code_1,
+                        '<br>Providers:',
+                        c_total,
+                        '<br>Source Gender:',
+                        Provider.Gender.Code.x)) %>%
+  layout(xaxis =  list(title = "% of Specialty is Women"),
+         yaxis = list(title = "% Orders to Women"))
+
+npi_dic %>%
+  filter(Provider.Gender.Code == '') %>%
+  group_by(Healthcare.Provider.Taxonomy.Code_1) %>%
+  summarise(freq = n()) %>%
+  arrange(desc(freq)) %>%
+  View()
+```
